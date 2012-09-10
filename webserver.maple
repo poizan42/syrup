@@ -1,0 +1,132 @@
+with(Sockets):with(StringTools):
+HTTPServer := module()
+  export WebServer;
+  local atoi, itoa, GetLocaltimeOffset, HttpDateTimeFmt, SplitN, ServerVersion, DefaultHeaders, WriteHeaders, StaticResponse, WebError, ParseHeaders, ParseRequest;
+  atoi := s -> convert(s, 'decimal', 10):
+  itoa := n -> cat(n, ""):
+  GetLocaltimeOffset := proc(ts)
+    local sysSecs, hm, hms, localSecs;
+    sysSecs := ts mod 24*60*60;
+    sysSecs := sysSecs - irem(sysSecs, 60); #round to nearest minute
+    hm := FormatTime("%H:%M", timestamp=ts);
+    hms := Split(hm, ":");
+    localSecs := atoi(hms[1])*60*60 + atoi(hms[2])*60;
+    return iquo(localSecs - sysSecs, 60);
+  end proc:
+  HttpDateTimeFmt := proc(p_ts::integer := NULL)
+    local ts;
+    if p_ts = NULL then
+      ts := iolib(25);
+    else
+      ts := p_ts;
+    end if;
+    return FormatTime("%a, %d %b %Y %H:%M:%S GMT", timestamp=ts-GetLocaltimeOffset(ts)*60);
+  end proc:
+  SplitN := proc(s, sep, count)
+    local i::integer, start::integer, result::list;
+    start := 1;
+    result := [];
+    for i from 1 to length(s) do
+      if s[i] = sep then
+        result := [op(result), s[start..i-1]];
+        start := i+1;
+        if nops(result) = count then
+          break;
+        end if;
+      end if;
+    end do;
+    if i >= start then
+      result := [op(result), s[start..length(s)]]
+    end if;
+    return result;
+  end proc:
+  ServerVersion := () -> cat("Syrup 0.1 / ", kernelopts(version)):
+  DefaultHeaders := proc()
+    local ret;
+    ret := table();
+    ret["Date"] := HttpDateTimeFmt();
+    ret["Server"] := ServerVersion();
+    ret["Connection"] := "Close";
+    return ret;
+  end proc:
+  WriteHeaders := proc(sid, status, headers)
+    local header;
+    Write(sid, cat("HTTP/1.1 ", status, sprintf("\r\n")));
+    for header in indices(headers, 'pairs') do
+      Write(sid, cat(lhs(header), ": ", rhs(header), sprintf("\r\n")));
+    end do;
+    Write(sid, sprintf("\r\n"));
+  end proc:
+  StaticResponse := proc(sid, status, headers, body, writeBody::boolean := true)
+    headers["Content-Length"] := length(body);
+    WriteHeaders(sid, status, headers);
+    if writeBody then
+      Write(sid, body);
+      Write(sid, sprintf("\r\n\r\n"));
+    end if;
+  end proc:
+  WebError := proc(sid, code::integer, name::string)
+    local headers, body::string;
+    headers := DefaultHeaders();
+    headers["Content-Type"] := "text/plain; charset=iso-8859-1";
+    body := cat(code, " ", name);
+    StaticResponse(sid, cat(code, " ", name), headers, body);
+  end proc:
+  ParseHeaders := proc(sid)
+    local line::string, name::string, value::string,
+          folded::bolean, result::table, parts::list;
+    result := table();
+    folded := false;
+    line := TrimRight(ReadLine(sid));
+    while line <> "" do
+      if folded then
+        value := cat(value, line[2..length(line)]);
+      else
+        parts := SplitN(line, ":", 2);
+        name := Trim(parts[1]);
+        if nops(parts) < 2 then
+          value := ""; #error?
+        else
+          value := Trim(parts[2]);
+        end if;
+      end if;
+      line := TrimRight(ReadLine(sid));
+      folded := Ord(line) = 32 or Ord(line) = 9; #folded header
+      if not folded then
+        result[name] := value;
+      end if
+    end do;
+    return result;
+  end proc:
+  ParseRequest := proc(sid)
+    local line::string, parts::list, result::table;
+    line := TrimRight(ReadLine(sid));
+    parts := SplitN(line, " ", 3);
+    if ((parts[1] <> "GET") and (parts[1] <> "HEAD")) or ((parts[3] <> "HTTP/1.0") and (parts[3] <> "HTTP/1.1")) then
+      return false;
+    end if;
+    result := table();
+    result["method"] := parts[1];
+    result["query"] := parts[2];
+    result["protocol"] := parts[3];
+    result["headers"] := ParseHeaders(sid);
+    return result;
+  end proc:
+  WebServer := proc(sid)
+    local req, body, headers;
+    print(sprintf( "Connection from %s on port %d",
+          GetPeerHost(sid), GetPeerPort(sid)));
+    req := ParseRequest(sid);
+    if req = false then
+      WebError(sid, 400, "Bad Request");
+      return;
+    end if;
+    body := cat(
+      ServerVersion(), sprintf("\r\n\r\n"),
+      sprintf("Parsed headers:\r\n"),
+      convert([indices(req["headers"], 'pairs')], string));
+    headers := DefaultHeaders();
+    headers["Content-Type"] := "text/plain; charset=iso-8859-1";
+    StaticResponse(sid, "200 OK", headers, body, req["method"] <> "HEAD");
+  end proc:
+end module;
